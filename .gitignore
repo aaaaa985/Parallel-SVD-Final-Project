@@ -1,69 +1,71 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+# Build outputs
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
 *.a
-*.lib
-
-# Executables
+*.so
+*.dll
+*.dylib
 *.exe
+svd_cpu
+svd_gpu
+svd_mpi
+svd_openmp
+svd_pthread
+
+# CUDA build artifacts
+*.cubin
+*.ptx
+*.fatbin
+*.nvvp
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# Profiling outputs
+perf.data
+perf.data.old
+vtune_results/
+advisor_results/
+nsight_results/
+*.trace
+
+# Logs and benchmark raw outputs
+*.log
+nohup.out
+logs/*.tmp
+logs/*.bak
+
+# Keep useful benchmark outputs
+!logs/*.txt
+!logs/*.md
+!logs/*.csv
+
+# LaTeX temporary files
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
 *.out
-*.app
+*.synctex.gz
+*.toc
+*.lof
+*.lot
 
-# Build directories
-build/
-Build/
-build-*/
+# Python temporary files
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 
 # Temporary files
 *.tmp
-*.log
-*.bak
 *.swp
-
-# vcpkg
-vcpkg_installed/
-
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+*.swo

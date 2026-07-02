@@ -200,6 +200,20 @@ int main(int argc, char **argv)
     std::cout << "Bidiagonalization backend: CPU\n";
 #endif
 
+#ifdef USE_OPENMP
+#ifdef USE_TRANSPOSED_UV
+    std::cout << "GKH backend: OpenMP block parallel + transposed U/V cache\n";
+#else
+    std::cout << "GKH backend: OpenMP block parallel\n";
+#endif
+#else
+    std::cout << "GKH backend: serial/Pthread fallback\n";
+#endif
+
+#ifdef OMP_SCHEDULE_KIND
+    std::cout << "OpenMP schedule kind: " << OMP_SCHEDULE_KIND << "\n";
+#endif
+
     int total = 0;
     int passed = 0;
     double sum_bidiag_ms = 0.0;

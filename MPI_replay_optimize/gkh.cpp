@@ -69,6 +69,19 @@ namespace
         double s;
     };
 
+    static const char *mpi_gkh_mode()
+    {
+    #ifdef USE_MPI_REPLAY_TASKS
+    #ifdef USE_OPENMP_LOCAL_REPLAY
+        return "MPI_REPLAY_TASKS + OPENMP_LOCAL_REPLAY";
+    #else
+        return "MPI_REPLAY_TASKS";
+    #endif
+    #else
+        return "MPI_BLOCK_TASK";
+    #endif
+    }
+
     // ================= MPI 辅助函数前置声明 =================
     // 这些函数的定义在文件后部，但 MPI master/worker 函数会提前调用它们，
     // 因此需要先声明，避免 C++ 编译时出现 “not declared in this scope”
@@ -169,10 +182,68 @@ namespace
         }
     }
 
+    static void apply_right_cols_row_range(Matrix &M,
+                                           int row_begin,
+                                           int row_end,
+                                           int c0,
+                                           int c1,
+                                           double c,
+                                           double s)
+    {
+        for (int i = row_begin; i < row_end; ++i)
+        {
+            double *row = &M.at(i, 0);
+
+            const double a = row[c0];
+            const double b = row[c1];
+
+            row[c0] = a * c - b * s;
+            row[c1] = a * s + b * c;
+        }
+    }
+
     static void replay_rotations_local_rows(Matrix &localU,
                                             Matrix &localV,
                                             const std::vector<RotationLog> &logs)
     {
+    #ifdef USE_OPENMP_LOCAL_REPLAY
+    #pragma omp parallel default(none) shared(localU, localV, logs)
+        {
+            const int tid = omp_get_thread_num();
+            const int nt = omp_get_num_threads();
+
+            const int u_row_begin = localU.rows() * tid / nt;
+            const int u_row_end = localU.rows() * (tid + 1) / nt;
+
+            const int v_row_begin = localV.rows() * tid / nt;
+            const int v_row_end = localV.rows() * (tid + 1) / nt;
+
+            for (const auto &rot : logs)
+            {
+                if (rot.side == ROT_RIGHT_V)
+                {
+                    apply_right_cols_row_range(localV,
+                                               v_row_begin,
+                                               v_row_end,
+                                               rot.k0,
+                                               rot.k1,
+                                               rot.c,
+                                               rot.s);
+                }
+                else
+                {
+                    // 原 U <- U * L^T，对应 apply_right_cols(U, k0, k1, c, -s)。
+                    apply_right_cols_row_range(localU,
+                                               u_row_begin,
+                                               u_row_end,
+                                               rot.k0,
+                                               rot.k1,
+                                               rot.c,
+                                               -rot.s);
+                }
+            }
+        }
+    #else
         for (const auto &rot : logs)
         {
             if (rot.side == ROT_RIGHT_V)
@@ -181,11 +252,10 @@ namespace
             }
             else
             {
-                // 原 accumulate_left_into_U(U, k0, k1, c, s)
-                // 等价于 apply_right_cols(U, k0, k1, c, -s)
                 apply_right_cols_local_rows(localU, rot.k0, rot.k1, rot.c, -rot.s);
             }
         }
+    #endif
     }
 
     static int row_begin_for_rank(int total_rows, int rank, int mpi_size)
@@ -290,8 +360,13 @@ namespace
 
     static void write_mpi_replay_profile_csv(const MpiReplayProfile &prof)
     {
+    #ifdef USE_OPENMP_LOCAL_REPLAY
+        const std::string filename =
+            "files/mpi_profile_hybrid_np" + std::to_string(prof.mpi_size) + ".csv";
+    #else
         const std::string filename =
             "files/mpi_profile_replay_np" + std::to_string(prof.mpi_size) + ".csv";
+    #endif
 
         std::ifstream check(filename);
         const bool need_header = (!check.good()) ||
@@ -2094,6 +2169,14 @@ bool gkh_svd_from_bidiagonal_mpi(Matrix &U, Matrix &B, Matrix &V,
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    static bool mode_printed = false;
+    if (rank == 0 && !mode_printed)
+    {
+        std::cout << "[MPI GKH mode] " << mpi_gkh_mode()
+                  << ", mpi_size=" << size << std::endl;
+        mode_printed = true;
+    }
 
     if (size <= 1)
     {

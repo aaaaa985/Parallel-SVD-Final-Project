@@ -2,9 +2,14 @@ CXX := g++
 NVCC := nvcc
 
 OMP_SCHEDULE_KIND ?= 3
+TUV ?= 0
 
 CXXFLAGS := -O3 -std=c++17 -DUSE_OPENMP -DOMP_SCHEDULE_KIND=$(OMP_SCHEDULE_KIND) -fopenmp -pthread
 NVCCFLAGS := -O3 -std=c++17 -arch=sm_86
+
+ifeq ($(TUV),1)
+CXXFLAGS += -DUSE_TRANSPOSED_UV
+endif
 
 CPU_TARGET := svd_cpu
 GPU_TARGET := svd_gpu

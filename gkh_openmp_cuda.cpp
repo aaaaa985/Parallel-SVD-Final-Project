@@ -33,19 +33,6 @@ namespace
         int l;
         int r;
     };
-    
-    static Matrix transpose_matrix(const Matrix &A)
-    {
-        Matrix T(A.cols(), A.rows());
-        for (int i = 0; i < A.rows(); ++i)
-        {
-            for (int j = 0; j < A.cols(); ++j)
-            {
-                T.at(j, i) = A.at(i, j);
-            }
-        }
-        return T;
-    }
 
     // 对矩阵 M 的两行 r0, r1 左乘 Givens 旋转 [c s; -s c]。
     // 即 M <- L * M，其中 L 只作用在第 r0/r1 两行上。
@@ -83,20 +70,6 @@ namespace
             row0[j] = c * a + s * b;
             row1[j] = -s * a + c * b;
         }
-    }
-    
-    // 原 V <- V * R；维护 VT = V^T 时，等价于 VT <- R^T * VT。
-    // R = [c s; -s c]，因此 R^T = [c -s; s c]。
-    static void apply_right_rotation_to_VT(Matrix &VT, int c0, int c1, double c, double s)
-    {
-        apply_left_rows(VT, c0, c1, c, -s);
-    }
-
-    // 原 U <- U * L^T；维护 UT = U^T 时，等价于 UT <- L * UT。
-    // L = [c s; -s c]。
-    static void accumulate_left_into_UT(Matrix &UT, int r0, int r1, double c, double s)
-    {
-        apply_left_rows(UT, r0, r1, c, s);
     }
 
     // 对矩阵 M 的两列 c0, c1 右乘 Givens 旋转 [c s; -s c]。
@@ -267,42 +240,6 @@ namespace
             givens_rotation(B.at(k, k), B.at(k + 1, k), c, s, rr, true);
             apply_left_rows_range(B, k, k + 1, c, s, l, r);
             accumulate_left_into_U(U, k, k + 1, c, s);
-        }
-    }
-    
-    static void one_block_step_tuv(Matrix &UT, Matrix &B, Matrix &VT, int l, int r)
-    {
-        if (r <= l)
-        {
-            return;
-        }
-
-        const double mu = block_wilkinson_shift(B, l, r);
-
-        double c = 1.0;
-        double s = 0.0;
-        double rr = 0.0;
-
-        const double x = B.at(l, l) * B.at(l, l) - mu;
-        const double z = B.at(l, l) * B.at(l, l + 1);
-
-        givens_rotation(x, z, c, s, rr, false);
-        apply_right_cols_range(B, l, l + 1, c, s, l, r);
-        apply_right_rotation_to_VT(VT, l, l + 1, c, s);
-
-        givens_rotation(B.at(l, l), B.at(l + 1, l), c, s, rr, true);
-        apply_left_rows_range(B, l, l + 1, c, s, l, r);
-        accumulate_left_into_UT(UT, l, l + 1, c, s);
-
-        for (int k = l + 1; k <= r - 1; ++k)
-        {
-            givens_rotation(B.at(k - 1, k), B.at(k - 1, k + 1), c, s, rr, false);
-            apply_right_cols_range(B, k, k + 1, c, s, l, r);
-            apply_right_rotation_to_VT(VT, k, k + 1, c, s);
-
-            givens_rotation(B.at(k, k), B.at(k + 1, k), c, s, rr, true);
-            apply_left_rows_range(B, k, k + 1, c, s, l, r);
-            accumulate_left_into_UT(UT, k, k + 1, c, s);
         }
     }
 
@@ -517,81 +454,6 @@ namespace
     #endif
     }
     #endif
-    
-    #ifdef USE_OPENMP
-    static void run_block_steps_openmp_tuv(Matrix &UT, Matrix &B, Matrix &VT, const std::vector<Block> &blocks)
-    {
-        std::vector<Block> jobs;
-        jobs.reserve(blocks.size());
-
-        for (const auto &blk : blocks)
-        {
-            if (blk.r > blk.l)
-            {
-                jobs.push_back(blk);
-            }
-        }
-
-        if (jobs.empty())
-        {
-            return;
-        }
-
-        int thread_count = get_gkh_thread_count();
-
-        if (thread_count > static_cast<int>(jobs.size()))
-        {
-            thread_count = static_cast<int>(jobs.size());
-        }
-
-        if (thread_count <= 1)
-        {
-            for (int i = static_cast<int>(jobs.size()) - 1; i >= 0; --i)
-            {
-                one_block_step_tuv(UT, B, VT, jobs[i].l, jobs[i].r);
-            }
-            return;
-        }
-
-        omp_set_num_threads(thread_count);
-
-    #if OMP_SCHEDULE_KIND == 0
-    #pragma omp parallel for schedule(static) default(none) shared(UT, B, VT, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step_tuv(UT, B, VT, blk.l, blk.r);
-        }
-    #elif OMP_SCHEDULE_KIND == 1
-    #pragma omp parallel for schedule(dynamic, 1) default(none) shared(UT, B, VT, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step_tuv(UT, B, VT, blk.l, blk.r);
-        }
-    #elif OMP_SCHEDULE_KIND == 2
-    #pragma omp parallel for schedule(dynamic, 2) default(none) shared(UT, B, VT, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step_tuv(UT, B, VT, blk.l, blk.r);
-        }
-    #elif OMP_SCHEDULE_KIND == 3
-    #pragma omp parallel for schedule(guided) default(none) shared(UT, B, VT, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step_tuv(UT, B, VT, blk.l, blk.r);
-        }
-    #else
-    #error "Unknown OMP_SCHEDULE_KIND"
-    #endif
-    }
-    #endif
 
     static void run_block_steps_parallel(Matrix &U, Matrix &B, Matrix &V, const std::vector<Block> &blocks)
     {
@@ -646,75 +508,6 @@ namespace
         }
 
         cleanup_bidiagonal(B, tol);
-        return changed;
-    }
-    
-    // 转置 U/V 缓存版本：处理“对角元 d_k 近零但超对角 e_k 未近零”的情况。
-    // 与 chase_zero_diagonal 的数学操作一致，只是把对 U/V 的列更新改为对 UT/VT 的行更新。
-    static bool chase_zero_diagonal_tuv(Matrix &UT, Matrix &B, Matrix &VT, int k, double tol)
-    {
-        const int m = B.rows();
-        const int n = B.cols();
-
-        if (k < 0 || k >= n - 1)
-        {
-            return false;
-        }
-
-        if (std::fabs(B.at(k, k + 1)) <= tol)
-        {
-            return false;
-        }
-
-        bool changed = false;
-
-        for (int i = k; i <= n - 2; ++i)
-        {
-            double c = 1.0;
-            double s = 0.0;
-            double rr = 0.0;
-
-            // 右乘：使第 i 行满足 [d_i, e_i] * G = [r, 0]。
-            givens_rotation(B.at(i, i), B.at(i, i + 1), c, s, rr, false);
-            apply_right_cols(B, i, i + 1, c, s);
-            apply_right_rotation_to_VT(VT, i, i + 1, c, s);
-
-            // 左乘：消去 (i+1, i) 处由右乘引入的 bulge。
-            if (i + 1 < m)
-            {
-                givens_rotation(B.at(i, i), B.at(i + 1, i), c, s, rr, true);
-                apply_left_rows(B, i, i + 1, c, s);
-                accumulate_left_into_UT(UT, i, i + 1, c, s);
-            }
-
-            changed = true;
-        }
-
-        cleanup_bidiagonal(B, tol);
-        return changed;
-    }
-
-    // 转置 U/V 缓存版本：扫描所有 d_k≈0 的位置。
-    static bool handle_diagonal_zeros_tuv(Matrix &UT, Matrix &B, Matrix &VT, double tol)
-    {
-        const int n = B.cols();
-        bool changed = false;
-
-        const double eps = std::numeric_limits<double>::epsilon();
-        const double diag_tol = tol;
-        const double super_tol = tol * (1.0 + 10.0 * eps);
-
-        for (int k = 0; k < n - 1; ++k)
-        {
-            if (std::fabs(B.at(k, k)) <= diag_tol && std::fabs(B.at(k, k + 1)) > super_tol)
-            {
-                if (chase_zero_diagonal_tuv(UT, B, VT, k, tol))
-                {
-                    changed = true;
-                }
-            }
-        }
-
         return changed;
     }
 
@@ -852,24 +645,13 @@ bool gkh_svd_from_bidiagonal(Matrix &U, Matrix &B, Matrix &V, int max_iter, doub
         throw std::invalid_argument("gkh_svd_from_bidiagonal_v2: V must be n x n");
     }
 
-    #ifdef USE_TRANSPOSED_UV
-    Matrix UT = transpose_matrix(U);
-    Matrix VT = transpose_matrix(V);
-    #endif
-    
     bool converged = false;
 
     for (int iter = 0; iter < max_iter; ++iter)
     {
-        // 清理数值噪声，并处理 d_k≈0 但 e_k 未收敛的特殊情形。
-        // 普通版本更新 U/V；转置缓存版本同步更新 UT/VT。
+        // 清理数值噪声，并优先处理 d_k≈0 的特殊情形。
         cleanup_bidiagonal(B, tol);
-        
-        #ifdef USE_TRANSPOSED_UV
-        handle_diagonal_zeros_tuv(UT, B, VT, tol);
-        #else
         handle_diagonal_zeros(U, B, V, tol);
-        #endif
 
         // 根据超对角线断点拆分活动块
         // 这里子矩阵间是相互独立的，所以此处具有很大的并行潜力：你可以尝试多线程/多进程进行处理
@@ -902,11 +684,7 @@ bool gkh_svd_from_bidiagonal(Matrix &U, Matrix &B, Matrix &V, int max_iter, doub
             //}
         //}
         // 对本轮尚未收敛的活动块进行并行 GKH 迭代
-        #ifdef USE_TRANSPOSED_UV
-        run_block_steps_openmp_tuv(UT, B, VT, blocks);
-        #else
         run_block_steps_parallel(U, B, V, blocks);
-        #endif
     }
 
     // 迭代结束后统一结构清理与标准化输出。
@@ -915,12 +693,6 @@ bool gkh_svd_from_bidiagonal(Matrix &U, Matrix &B, Matrix &V, int max_iter, doub
     {
         B.at(i, i + 1) = 0.0;
     }
-    
-    #ifdef USE_TRANSPOSED_UV
-    U = transpose_matrix(UT);
-    V = transpose_matrix(VT);
-    #endif
-    
     make_nonnegative_and_sort(U, B, V);
 
     return converged;

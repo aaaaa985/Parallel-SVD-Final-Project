@@ -6,22 +6,9 @@
 #include <limits>
 #include <stdexcept>
 #include <vector>
-#include <atomic>
-#include <cstdlib>
-#include <iostream>
 
-#if defined(__aarch64__) || defined(__ARM_NEON)
-#include <arm_neon.h>
-#define GKH_USE_NEON 1
-#else
-#define GKH_USE_NEON 0
-#endif
-
-#include <pthread.h>
-
-#ifdef USE_OPENMP
-#include <omp.h>
-#endif
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#include <simde/arm/neon.h>
 
 namespace
 {
@@ -42,26 +29,22 @@ namespace
         int cols = M.cols();
         double* __restrict row0 = &M.at(r0, 0);
         double* __restrict row1 = &M.at(r1, 0);
-        int j = 0;
-
-    #if GKH_USE_NEON
         float64x2_t vc = vdupq_n_f64(c);
         float64x2_t vs = vdupq_n_f64(s);
         float64x2_t vneg_s = vdupq_n_f64(-s);
-
+        int j = 0;
+        // SIMD 主循环
         for (; j + 1 < cols; j += 2)
         {
             float64x2_t a = vld1q_f64(row0 + j);
             float64x2_t b = vld1q_f64(row1 + j);
-
+            // r0 = c*a + s*b
             float64x2_t r0v = vaddq_f64(vmulq_f64(vc, a), vmulq_f64(vs, b));
+            // r1 = -s*a + c*b
             float64x2_t r1v = vaddq_f64(vmulq_f64(vneg_s, a), vmulq_f64(vc, b));
-
             vst1q_f64(row0 + j, r0v);
             vst1q_f64(row1 + j, r1v);
         }
-    #endif
-
         // 尾部处理
         for (; j < cols; ++j)
         {
@@ -83,61 +66,6 @@ namespace
             double* row = &M.at(i, 0);
             double a = row[c0];
             double b = row[c1];
-            row[c0] = a * c - b * s;
-            row[c1] = a * s + b * c;
-        }
-    }
-
-    // 对矩阵 M 的两行 r0, r1 左乘 Givens 旋转，但只更新列区间 [c_begin, c_end]。
-    // 这个函数主要用于 B 的块内更新，避免不同 block 并行时写到彼此的区域。
-    static void apply_left_rows_range(Matrix &M, int r0, int r1, double c, double s, int c_begin, int c_end)
-    {
-        double *__restrict row0 = &M.at(r0, 0);
-        double *__restrict row1 = &M.at(r1, 0);
-
-        int j = c_begin;
-
-    #if GKH_USE_NEON
-        float64x2_t vc = vdupq_n_f64(c);
-        float64x2_t vs = vdupq_n_f64(s);
-        float64x2_t vneg_s = vdupq_n_f64(-s);
-
-        for (; j + 1 <= c_end; j += 2)
-        {
-            float64x2_t a = vld1q_f64(row0 + j);
-            float64x2_t b = vld1q_f64(row1 + j);
-
-            float64x2_t r0v = vaddq_f64(vmulq_f64(vc, a), vmulq_f64(vs, b));
-            float64x2_t r1v = vaddq_f64(vmulq_f64(vneg_s, a), vmulq_f64(vc, b));
-
-            vst1q_f64(row0 + j, r0v);
-            vst1q_f64(row1 + j, r1v);
-        }
-    #endif
-
-        for (; j <= c_end; ++j)
-        {
-            double a = row0[j];
-            double b = row1[j];
-
-            row0[j] = c * a + s * b;
-            row1[j] = -s * a + c * b;
-        }
-    }
-
-    // 对矩阵 M 的两列 c0, c1 右乘 Givens 旋转，但只更新行区间 [r_begin, r_end]。
-    // 这个函数主要用于 B 的块内更新，避免不同 block 并行时写到彼此的区域。
-    static void apply_right_cols_range(Matrix &M, int c0, int c1,
-                                       double c, double s,
-                                       int r_begin, int r_end)
-    {
-        for (int i = r_begin; i <= r_end; ++i)
-        {
-            double *row = &M.at(i, 0);
-
-            double a = row[c0];
-            double b = row[c1];
-
             row[c0] = a * c - b * s;
             row[c1] = a * s + b * c;
         }
@@ -221,247 +149,26 @@ namespace
         const double x = B.at(l, l) * B.at(l, l) - mu;
         const double z = B.at(l, l) * B.at(l, l + 1);
         givens_rotation(x, z, c, s, rr, false);
-        apply_right_cols_range(B, l, l + 1, c, s, l, r);
+        apply_right_cols(B, l, l + 1, c, s);
         apply_right_cols(V, l, l + 1, c, s);
 
         // 首次左乘：消去 (l+1, l)。
         givens_rotation(B.at(l, l), B.at(l + 1, l), c, s, rr, true);
-        apply_left_rows_range(B, l, l + 1, c, s, l, r);
+        apply_left_rows(B, l, l + 1, c, s);
         accumulate_left_into_U(U, l, l + 1, c, s);
 
         for (int k = l + 1; k <= r - 1; ++k)
         {
             // 右乘：消去 (k-1, k+1)
             givens_rotation(B.at(k - 1, k), B.at(k - 1, k + 1), c, s, rr, false);
-            apply_right_cols_range(B, k, k + 1, c, s, l, r);
+            apply_right_cols(B, k, k + 1, c, s);
             apply_right_cols(V, k, k + 1, c, s);
 
             // 左乘：消去 (k+1, k)
             givens_rotation(B.at(k, k), B.at(k + 1, k), c, s, rr, true);
-            apply_left_rows_range(B, k, k + 1, c, s, l, r);
+            apply_left_rows(B, k, k + 1, c, s);
             accumulate_left_into_U(U, k, k + 1, c, s);
         }
-    }
-
-    // Pthread 工作线程共享的任务上下文
-    struct BlockTaskContext
-    {
-        Matrix *U;
-        Matrix *B;
-        Matrix *V;
-        const std::vector<Block> *jobs;
-        std::atomic<int> *next_job;
-    };
-
-    // Pthread 工作线程入口函数
-    static void *block_worker_func(void *arg)
-    {
-        BlockTaskContext *ctx = static_cast<BlockTaskContext *>(arg);
-
-        while (true)
-        {
-            int pos = ctx->next_job->fetch_add(1, std::memory_order_relaxed);
-            int total = static_cast<int>(ctx->jobs->size());
-
-            if (pos >= total)
-            {
-                break;
-            }
-
-            // 为了尽量保持原串行版本“从右到左”的处理倾向，
-            // 这里按 jobs 的逆序取任务。
-            const Block &blk = (*(ctx->jobs))[total - 1 - pos];
-
-            one_block_step(*(ctx->U), *(ctx->B), *(ctx->V), blk.l, blk.r);
-        }
-
-        return nullptr;
-    }
-
-    // 获取本次 GKH block 并行阶段使用的线程数
-    // 由于 test.sh/qsub 运行方式下环境变量无法稳定传递到计算节点，
-    // 因此这里通过手动修改返回值测试 1、2、4、8 线程
-    static int get_gkh_thread_count()
-    {
-        const char *env = std::getenv("SVD_GKH_THREADS");
-        if (env == nullptr)
-        {
-            env = std::getenv("OMP_NUM_THREADS");
-        }
-
-        if (env != nullptr)
-        {
-            const int t = std::atoi(env);
-            if (t > 0)
-            {
-                return t;
-            }
-        }
-
-    #ifdef USE_OPENMP
-        const int omp_threads = omp_get_max_threads();
-        if (omp_threads > 0)
-        {
-            return omp_threads;
-        }
-    #endif
-
-        return 8;
-    }
-
-    // OpenMP 调度策略：
-    // 0: schedule(static)
-    // 1: schedule(dynamic, 1)
-    // 2: schedule(dynamic, 2)
-    // 3: schedule(guided)
-    #ifndef OMP_SCHEDULE_KIND
-    #define OMP_SCHEDULE_KIND 2
-    #endif
-
-    // 并行执行当前迭代轮次中的所有非平凡活动块
-    static void run_block_steps_pthread(Matrix &U, Matrix &B, Matrix &V, const std::vector<Block> &blocks)
-    {
-        std::vector<Block> jobs;
-        jobs.reserve(blocks.size());
-
-        for (const auto &blk : blocks)
-        {
-            if (blk.r > blk.l)
-            {
-                jobs.push_back(blk);
-            }
-        }
-
-        if (jobs.empty())
-        {
-            return;
-        }
-
-        int thread_count = get_gkh_thread_count();
-
-        if (thread_count > static_cast<int>(jobs.size()))
-        {
-            thread_count = static_cast<int>(jobs.size());
-        }
-
-        // 任务太少时直接串行，避免 pthread 创建开销反而拖慢。
-        if (thread_count <= 1)
-        {
-            for (int i = static_cast<int>(jobs.size()) - 1; i >= 0; --i)
-            {
-                one_block_step(U, B, V, jobs[i].l, jobs[i].r);
-            }
-            return;
-        }
-
-        std::atomic<int> next_job(0);
-
-        BlockTaskContext ctx;
-        ctx.U = &U;
-        ctx.B = &B;
-        ctx.V = &V;
-        ctx.jobs = &jobs;
-        ctx.next_job = &next_job;
-
-        // 最多启动 thread_count - 1 个子线程，主线程也参与计算。
-        std::vector<pthread_t> workers(thread_count - 1);
-
-        for (int i = 0; i < thread_count - 1; ++i)
-        {
-            pthread_create(&workers[i], nullptr, block_worker_func, &ctx);
-        }
-
-        // 主线程也作为工作线程执行任务。
-        block_worker_func(&ctx);
-
-        for (int i = 0; i < thread_count - 1; ++i)
-        {
-            pthread_join(workers[i], nullptr);
-        }
-    }
-
-    #ifdef USE_OPENMP
-    static void run_block_steps_openmp(Matrix &U, Matrix &B, Matrix &V, const std::vector<Block> &blocks)
-    {
-        std::vector<Block> jobs;
-        jobs.reserve(blocks.size());
-
-        for (const auto &blk : blocks)
-        {
-            if (blk.r > blk.l)
-            {
-                jobs.push_back(blk);
-            }
-        }
-
-        if (jobs.empty())
-        {
-            return;
-        }
-
-        int thread_count = get_gkh_thread_count();
-
-        if (thread_count > static_cast<int>(jobs.size()))
-        {
-            thread_count = static_cast<int>(jobs.size());
-        }
-
-        if (thread_count <= 1)
-        {
-            for (int i = static_cast<int>(jobs.size()) - 1; i >= 0; --i)
-            {
-                one_block_step(U, B, V, jobs[i].l, jobs[i].r);
-            }
-            return;
-        }
-
-        omp_set_num_threads(thread_count);
-
-    #if OMP_SCHEDULE_KIND == 0
-    #pragma omp parallel for schedule(static) default(none) shared(U, B, V, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step(U, B, V, blk.l, blk.r);
-        }
-    #elif OMP_SCHEDULE_KIND == 1
-    #pragma omp parallel for schedule(dynamic, 1) default(none) shared(U, B, V, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step(U, B, V, blk.l, blk.r);
-        }
-    #elif OMP_SCHEDULE_KIND == 2
-    #pragma omp parallel for schedule(dynamic, 2) default(none) shared(U, B, V, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step(U, B, V, blk.l, blk.r);
-        }
-    #elif OMP_SCHEDULE_KIND == 3
-    #pragma omp parallel for schedule(guided) default(none) shared(U, B, V, jobs)
-        for (int pos = 0; pos < static_cast<int>(jobs.size()); ++pos)
-        {
-            int idx = static_cast<int>(jobs.size()) - 1 - pos;
-            const Block &blk = jobs[idx];
-            one_block_step(U, B, V, blk.l, blk.r);
-        }
-    #else
-    #error "Unknown OMP_SCHEDULE_KIND"
-    #endif
-    }
-    #endif
-
-    static void run_block_steps_parallel(Matrix &U, Matrix &B, Matrix &V, const std::vector<Block> &blocks)
-    {
-    #ifdef USE_OPENMP
-        run_block_steps_openmp(U, B, V, blocks);
-    #else
-        run_block_steps_pthread(U, B, V, blocks);
-    #endif
     }
 
     // 处理“对角元 d_k 近零但超对角 e_k 未近零”的情况。
@@ -676,15 +383,13 @@ bool gkh_svd_from_bidiagonal(Matrix &U, Matrix &B, Matrix &V, int max_iter, doub
         }
 
         // 从右到左处理每个非平凡块，减少末端块对前面块的干扰。
-        //for (int i = static_cast<int>(blocks.size()) - 1; i >= 0; --i)
-        //{
-            //if (blocks[i].r > blocks[i].l)
-            //{
-                //one_block_step(U, B, V, blocks[i].l, blocks[i].r);
-            //}
-        //}
-        // 对本轮尚未收敛的活动块进行并行 GKH 迭代
-        run_block_steps_parallel(U, B, V, blocks);
+        for (int i = static_cast<int>(blocks.size()) - 1; i >= 0; --i)
+        {
+            if (blocks[i].r > blocks[i].l)
+            {
+                one_block_step(U, B, V, blocks[i].l, blocks[i].r);
+            }
+        }
     }
 
     // 迭代结束后统一结构清理与标准化输出。
